@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import string
 from pprint import pprint
+from line_profiler import LineProfiler
 
 # REQUIRED PYTHON PACKAGES:
 # mypy
@@ -18,7 +19,6 @@ from pprint import pprint
 # that we are evaluating is yellow, but we have never seen a yellow painting before), then we classify that datum as whatever the "bias"
 # value is.
 DecisionTree = Union[Dict[str, 'DecisionTree'], str]
-
 class DecisionTreeTrainer:
     def __init__(self, label_col: str, feature_cols: List[str]):
         self.label_col = label_col
@@ -33,20 +33,21 @@ class DecisionTreeTrainer:
     
     # private
     def info_gain(self, df: pd.DataFrame, split_col: str) -> float:
-        # https://pandas.pydata.org/pandas-docs/stable/user_guide/groupby.html#aggregation-with-user-defined-functions
+        def agg_ent_size(group):
+            return pd.Series({'size': len(group), 'entropy': self.entropy(group)})
+            
         ents = (df
                 .groupby(split_col)[[self.label_col]]
-                .agg([self.entropy, 'size'])
-                .assign(
-                    # calculate how many items there are in the induced subgroup
-                    total_size=lambda x: sum(x[self.label_col]['size']),
-                    weighted_entropy=lambda x: x[self.label_col]['entropy'] * x[self.label_col]['size']/x['total_size']))
+                .apply(agg_ent_size))
+        ents['weighted_entropy'] = ents['entropy'] * ents['size'] / df.shape[0]
         # apply the entropy calculation
         return self.entropy(df[self.label_col]) - np.sum(ents['weighted_entropy'])
 
 
 
-    # private
+    ###############################                 PRIVATE METHOD              ##################################
+    # Induce a decision tree from training data in a pandas dataframe. If the labels are evenly split, decide in favor
+    # of the provided bias.
     def induce_tree(self, training: pd.DataFrame, parent_bias: str) -> DecisionTree:
         # if there is only one type of value remaining in our induced subgroup, then we have hit our basecase
         counts = training[self.label_col].value_counts()
@@ -60,7 +61,7 @@ class DecisionTreeTrainer:
         if training[self.feature_cols].duplicated(keep=False).all():
             return curr_bias
         
-        # make a tuple of tuples where each subtuple is contains the information gain and the column to split on
+        # make a tuple of tuples where each subtuple contains the information gain and the column to split on
         info_gains: Tuple[Tuple[float, str],...] = tuple((self.info_gain(training, feature_col), feature_col) for feature_col in self.feature_cols)
         #  if splitting on two columns would result in an identical information gain, then split on the leftmost one
         split_idx: int = info_gains.index(max(info_gains, key=lambda x: x[0]))
@@ -70,7 +71,8 @@ class DecisionTreeTrainer:
         # ie evaluate all of the potential answers to the 'split_feature' question
         for field in training[split_feature].unique():
             # recurse on the subgroup induced by the chosen feature with respect to the current field
-            # ex. if we are classifying paintings, the chosen feature may be "medium" and the current field may be "acrylic"
+            # ex. if we are classifying paintings, the chosen feature may be "medium", the current field may be "acrylic", 
+            # and the induced subgroup might be every data point with "acrylic" as the medium
             induced_subset = training.loc[training[split_feature] == field]
             tree[field] = self.induce_tree(induced_subset, curr_bias)
 
@@ -127,7 +129,7 @@ class DecisionTreeTrainer:
             if key in ('feature', 'bias') or isinstance(temp, str):
                 continue
 
-            sub_tree[key] = sub_tree['bias']
+            sub_tree[key] = cast(Dict[str, DecisionTree], sub_tree[key])['bias']
             # if this pruning operation was the best that we've seen so far, then make it our new best
             tree_score = self.test_tree(testing, sub_tree)
             if tree_score > best_pruned_tree_score or (tree_score == best_pruned_tree_score and 
@@ -147,19 +149,38 @@ class DecisionTreeTrainer:
         return best_pruned_tree_score, best_pruned_tree
 
     # private
-    def tune_tree(self, training: pd.DataFrame, tuning: pd.DataFrame) -> Dict:
+    def tune_tree(self, data: pd.DataFrame, training_tuning_partitioner: Callable[[pd.DataFrame], Tuple[pd.DataFrame, pd.DataFrame]]) ->Tuple[float, DecisionTree]:
+        training, tuning = training_tuning_partitioner(data)
+        # calculate the bias of the training set and make a decision tree:
         bias = str(training[self.label_col].value_counts().idxmax())
         tree = self.induce_tree(training, bias)
+        # test the tree on the tuning set
+        score = self.test_tree(tuning, tree)
+        # prune the tree and test it on the tuning set
+        pruned_score, pruned_tree = self.prune_tree_greedily(tuning, tree, tree)
+        # keep pruning the tree until the best pruning doesn't produce a better score
+        while pruned_score > score:
+            score = pruned_score
+            tree = pruned_tree
+            pruned_score, pruned_tree = self.prune_tree_greedily(tuning, tree, tree)
 
-
-        return {}
+        return score, tree
 
     # public
-    def leave_one_out_train(self, training: pd.DataFrame, tuning_set_inducer: Callable[[pd.DataFrame], pd.DataFrame]) -> Tuple[Dict, float]:
-        return ({}, 0.0)
+    def leave_one_out_train(self, data: pd.DataFrame, training_tuning_partitioner: Callable[[pd.DataFrame], Tuple[pd.DataFrame, pd.DataFrame]]) -> Tuple[DecisionTree, float]:
+        _, tree = self.tune_tree(data, training_tuning_partitioner)
+        score = 0.0
+        for index, row in data.iterrows():
+            # make a tree with every row except for "index"
+            _, minus_one_tree = self.tune_tree(data.drop(index), training_tuning_partitioner)
+            # test our tree on the index we had dropped
+            score += self.test_tree(data.loc[[index]], minus_one_tree)
+            print(index)
+        # return an average score across all trees and tests:
+        return tree, score/data.shape[0]
+            
 
         
-
 
 def makeDecisionTree(tsvfile: TextIO):
     df = pd.read_csv(tsvfile, sep='\t', header=None, names = ['Rep', 'Party', 'Votes'])
@@ -175,13 +196,24 @@ def makeDecisionTree(tsvfile: TextIO):
     # rename the numbered columns to letters indicating which issue is being voted on:
     new_cols: List[str] = [string.ascii_lowercase[cast(int, col)] if isinstance(col, int) else col for col in df.columns]
     df.columns = pd.Index(new_cols)
+    training_tuning_partitioner =  lambda x: (x.loc[lambda row: row.index % 4 != 0], x[::4])
 
     features =  list(string.ascii_lowercase[0:10])
     dtt = DecisionTreeTrainer('Party', features)
-    tree = dtt.induce_tree(df, 'Rep')
-    test =dtt.test_tree(df, tree)
-    pprint(tree)
-    print(test)
+    #tree = dtt.induce_tree(df, 'Rep')
+    # test =dtt.test_tree(df, tree)
+    # pprint(tree)
+    # print(test)
+    profiler = LineProfiler()
+    profiler.add_function(dtt.tune_tree)
+    profiler.add_function(dtt.induce_tree)
+    profiler.add_function(dtt.info_gain)
+    profiler.add_function(dtt.entropy)
+    profiler.runctx('dtt.tune_tree(df, training_tuning_partitioner)', globals(), locals())
+    profiler.print_stats()
+    #pruned_score, pruned_tree = dtt.leave_one_out_train(df, training_tuning_partitioner)
+    #pprint(pruned_tree)
+    #print(pruned_score)
 
     test_df = pd.DataFrame({
         'Size': ['big', 'medium', 'big', 'small', 'big', 'small', 'medium', 'small', 'medium', 'big'],
@@ -190,15 +222,9 @@ def makeDecisionTree(tsvfile: TextIO):
         'Label': ['good', 'good', 'good', 'good', 'good', 'bad', 'bad', 'bad', 'bad', 'bad']
     })
     test_dtt = DecisionTreeTrainer('Label', ['Size', 'Color', 'Medium'])
-    # ig = test_dtt.info_gain(test_df, 'Medium')
-    # print(ig)
-    tree = test_dtt.induce_tree(test_df, 'Good')
-    pprint(tree)
-    val = test_dtt.test_tree(test_df, tree)
-    print(val)
-    print(test_dtt.count_nodes_in_tree(tree))
-    print(test_dtt.prune_tree_greedily(df, tree, tree))
-
+    pruned_score, pruned_tree = test_dtt.leave_one_out_train(test_df,training_tuning_partitioner)
+    pprint(pruned_tree)
+    print(pruned_score)
 
 
 
