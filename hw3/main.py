@@ -38,8 +38,8 @@ def makeDecisionTree(tsvfile: TextIO):
     profiler.add_function(dtt._entropy)
     #profiler.runctx('dtt.cross_validate(50, training_tuning_partitioner, True)', globals(), locals())
     #profiler.print_stats()
-    pruned_score, pruned_tree = dtt.tuned_tree(training_tuning_partitioner)#
-    #pruned_score, pruned_tree = dtt.cross_validate(df.shape[0], training_tuning_partitioner, True)
+    #pruned_score, pruned_tree = dtt.tuned_tree(training_tuning_partitioner)#
+    pruned_score, pruned_tree = dtt.cross_validate(df.shape[0], training_tuning_partitioner, True)
     pprint(pruned_tree)
     print(pruned_score)
     DecisionTreeTrainer.print_tree(pruned_tree, decorator='Issue')

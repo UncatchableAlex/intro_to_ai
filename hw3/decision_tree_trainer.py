@@ -2,6 +2,7 @@ from typing import Tuple, List, Callable, cast, Union, Dict
 import pandas as pd
 import numpy as np
 import multiprocessing
+from copy import deepcopy
 from functools import partial
 
 # REQUIRED PYTHON PACKAGES:
@@ -132,10 +133,10 @@ class DecisionTreeTrainer:
 
             sub_tree[key] = cast(Dict[str, DecisionTree], sub_tree[key])['bias']
             # if this pruning operation was the best that we've seen so far, then make it our new best
-            tree_score = self._test_tree(testing, sub_tree)
+            tree_score = self._test_tree(testing, whole_tree)
             if tree_score > best_pruned_tree_score or (tree_score == best_pruned_tree_score and 
                                                        self._count_nodes_in_tree(whole_tree) < self._count_nodes_in_tree(best_pruned_tree)):
-                best_pruned_tree = dict(whole_tree)
+                best_pruned_tree = deepcopy(whole_tree)
                 best_pruned_tree_score = tree_score
             # undo our pruning
             sub_tree[key] = temp
@@ -212,7 +213,7 @@ class DecisionTreeTrainer:
                     line = f'{indent}{sub_feature} {sub_tree}'
                     print(line)
                 else:
-                    line = f'{indent}{sub_feature} {decorator} {str(sub_tree["feature"])}:'
+                    line = f'{indent}{sub_feature} {decorator} {sub_tree["feature"]}:'
                     print(line)
                     DecisionTreeTrainer._print_tree(sub_tree, decorator, depth + 1)
 
