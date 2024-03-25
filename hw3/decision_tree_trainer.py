@@ -7,6 +7,7 @@ from functools import partial
 
 # REQUIRED PYTHON PACKAGES:
 # mypy
+# numpy
 # pandas
 # pandas-stubs
 
@@ -14,43 +15,59 @@ from functools import partial
 # Mypy doesn't handle complicated recursive definitions very well, so we will use a simple recursive definition.
 # Keep in mind that, in practice, every non-leaf node of the decision tree must have a string key called "feature" to represent
 # which feature to test next (a painting's size, medium, or color, for example), AND a string key called "bias" to represent
-# the majority label of data at that juncture. If there isn't an applicable value for the feature to split on (ie, the painting 
+# the majority label of data at that node. If there isn't an applicable value for the feature to split on (ie, the painting 
 # that we are evaluating is yellow, but we have never seen a yellow painting before), then we classify that datum as whatever the "bias"
 # value is.
 DecisionTree = Union[Dict[str, 'DecisionTree'], str]
+
+# Define a function type that splits a dataframe into two dataframes.
 DFPartitioner = Callable[[pd.DataFrame], Tuple[pd.DataFrame, pd.DataFrame]]
 
 class DecisionTreeTrainer:
     def __init__(self, data: pd.DataFrame, label_col: str, feature_cols: List[str]):
+        """
+        DecisionTreeTrainer constructor. As input, we take a Pandas dataframe called *data* that has *feature_cols* as its columns
+        along with a label column called *label_col*.
+        """
         self.label_col = label_col
         self.feature_cols = feature_cols
         self.data = data
 
     # private
     def _entropy(self, series: pd.Series) -> float:
+        """
+        Given a pandas series, return the entropy of the set.
+        """
         # fun fact: about 40 percent of the time doing a cross-fold validation is spent on this single line
         # find the percentage of the series with respect to each element:
         probs = series.value_counts(normalize=True)
         return -np.sum(probs * np.log2(probs))
     
     # private
-    def _info_gain(self, df: pd.DataFrame, split_col: str) -> float:
+    def _info_gain(self, df: pd.DataFrame, split_col: str, df_entropy: float) -> float:
+        """
+            df: a pandas dataframe
+            split col: the column that the data is being split on. Ie, the question that is being asked of the data.
+            df_entropy: the entropy of label column of df
+            return the information gain from ascertaining the value of split_col. 
+        """
         def agg_ent_size(group):
             return pd.Series({'size': len(group), 'entropy': self._entropy(group)})
             
-        ents = (df
+        entropies = (df
                 .groupby(split_col)[[self.label_col]]
                 .apply(agg_ent_size))
-        ents['weighted_entropy'] = ents['entropy'] * ents['size'] / df.shape[0]
+        entropies['weighted_entropy'] = entropies['entropy'] * entropies['size'] / df.shape[0]
         # apply the entropy calculation
-        return self._entropy(df[self.label_col]) - np.sum(ents['weighted_entropy'])
+        return df_entropy - np.sum(entropies['weighted_entropy'])
 
 
-
-    ###############################                 PRIVATE METHOD              ##################################
-    # Induce a decision tree from training data in a pandas dataframe. If the labels are evenly split, decide in favor
-    # of the provided bias.
-    def _induce_tree(self, training: pd.DataFrame, parent_bias: str) -> DecisionTree:
+    # private
+    def _induce_tree(self, training: pd.DataFrame, parent_bias: str, splittable_cols: List[str]) -> DecisionTree:
+        """
+        Induce a decision tree from training data in a pandas dataframe. If the labels in the dataset are evenly split,
+        decide in favor the provided bias. 
+        """
         # if there is only one type of value remaining in our induced subgroup, then we have hit our basecase
         counts = training[self.label_col].value_counts()
         if counts.shape[0] == 1:
@@ -59,12 +76,14 @@ class DecisionTreeTrainer:
         # figure out how our results should be biased in the case that our data is completely evenly labled.
         # ie if each label has the same number of data points
         curr_bias: str = parent_bias if counts.duplicated(keep=False).all() else str(counts.idxmax())
-        # if all of the data points are identical, then we have our other basecase. Return the bias:
-        if training[self.feature_cols].duplicated(keep=False).all():
+        # if we are out of columns that we can split on or all of the data points are identical, 
+        # then we have reached our other basecase. Return the bias:
+        if (not splittable_cols) or training[self.feature_cols].duplicated(keep=False).all():
             return curr_bias
         
         # make a tuple of tuples where each subtuple contains the information gain and the column to split on
-        info_gains: Tuple[Tuple[float, str],...] = tuple((self._info_gain(training, feature_col), feature_col) for feature_col in self.feature_cols)
+        df_entropy: float = self._entropy(training[self.label_col])
+        info_gains: Tuple[Tuple[float, str],...] = tuple((self._info_gain(training, feature_col, df_entropy), feature_col) for feature_col in splittable_cols)
         #  if splitting on two columns would result in an identical information gain, then split on the leftmost one
         split_idx: int = info_gains.index(max(info_gains, key=lambda x: x[0]))
         split_feature: str = info_gains[split_idx][-1]
@@ -76,14 +95,19 @@ class DecisionTreeTrainer:
             # ex. if we are classifying paintings, the chosen feature may be "medium", the current field may be "acrylic", 
             # and the induced subgroup might be every data point with "acrylic" as the medium
             induced_subset = training.loc[training[split_feature] == field]
-            tree[field] = self._induce_tree(induced_subset, curr_bias)
-
+            # remove the feature that we just split on from the list of splittable columns
+            next_splittable_cols: List[str] = list(splittable_cols)
+            next_splittable_cols.remove(split_feature)
+            tree[field] = self._induce_tree(induced_subset, curr_bias, next_splittable_cols)
         return tree
         
         
 
     # private
     def _classify_datum(self, datum: pd.Series, root: DecisionTree) -> str:
+        """
+        Given a data point and a decision tree, classify the data point.
+        """
         curr = root
         while not isinstance(curr, str):
             feat = datum[cast(str, curr['feature'])]
@@ -95,6 +119,9 @@ class DecisionTreeTrainer:
     
     # private
     def _test_tree(self, testing: pd.DataFrame, root: DecisionTree) -> float:
+        """
+        Given a testing set, and a decision tree, find the accuracy of the decision tree on the test set.
+        """
         # apply our _classify_datum function across each row
         classifications = testing.apply(lambda row: self._classify_datum(row, root), axis=1)
         # get all the rows where our classification was correct:
@@ -115,12 +142,16 @@ class DecisionTreeTrainer:
         return count
 
     # private
-    def _prune_tree_greedily(self, testing: pd.DataFrame, sub_tree: DecisionTree, whole_tree:  DecisionTree) -> Tuple[float, DecisionTree]:
+    def _prune_tree_greedily(self, tuning: pd.DataFrame, sub_tree: DecisionTree, root: DecisionTree) -> Tuple[float, DecisionTree]:
+        """
+        Given a tuning set, a subtree, and the root of the entire tree to which the subtree belongs, return a tree with the single best pruning
+        operation having been performed within the subtree. 
+        """
         best_pruned_tree = sub_tree
         best_pruned_tree_score = 0.0
         # if we have found a leaf, return a really low score so that it doesn't get pruned. In reality, this should
         # never happen because of a check in the while loop before we recurse. It's mostly to appease the typechecker :(
-        if isinstance(sub_tree, str) or isinstance(whole_tree, str):
+        if isinstance(sub_tree, str) or isinstance(root, str):
             return best_pruned_tree_score, best_pruned_tree
         
         for key in sub_tree.keys():
@@ -130,18 +161,18 @@ class DecisionTreeTrainer:
             # if the sub-sub-tree is a leaf or metadata, then continue
             if key in ('feature', 'bias') or isinstance(temp, str):
                 continue
-
+            # prune the given child node into a leaf
             sub_tree[key] = cast(Dict[str, DecisionTree], sub_tree[key])['bias']
             # if this pruning operation was the best that we've seen so far, then make it our new best
-            tree_score = self._test_tree(testing, whole_tree)
+            tree_score = self._test_tree(tuning, root)
             if tree_score > best_pruned_tree_score or (tree_score == best_pruned_tree_score and 
-                                                       self._count_nodes_in_tree(whole_tree) < self._count_nodes_in_tree(best_pruned_tree)):
-                best_pruned_tree = deepcopy(whole_tree)
+                                                       self._count_nodes_in_tree(root) < self._count_nodes_in_tree(best_pruned_tree)):
+                best_pruned_tree = deepcopy(root)
                 best_pruned_tree_score = tree_score
             # undo our pruning
             sub_tree[key] = temp
             # get the best pruning from a branch further down the tree from where we are now:
-            best_pruned_child_tree_score, best_pruned_child_tree = self._prune_tree_greedily(testing, sub_tree[key], whole_tree)
+            best_pruned_child_tree_score, best_pruned_child_tree = self._prune_tree_greedily(tuning, sub_tree[key], root)
             # if it's better than any pruning we've found so far, set it as our best found pruning
             if best_pruned_child_tree_score > best_pruned_tree_score or (best_pruned_child_tree_score == best_pruned_tree_score and 
                                                        self._count_nodes_in_tree(best_pruned_child_tree) < self._count_nodes_in_tree(best_pruned_tree)):
@@ -152,10 +183,14 @@ class DecisionTreeTrainer:
 
     # private
     def _tuned_tree(self, data: pd.DataFrame, training_tuning_partitioner: DFPartitioner) ->Tuple[float, DecisionTree]:
+        """
+        Return a tree trained using the training set inferred from training_tuning_partitioner and pruned using the tuning set inferred from
+        training_tuning_partitioner. The accuracy of the tree on the tuning set is also returned.
+        """
         training, tuning = training_tuning_partitioner(data)
         # calculate the bias of the training set and make a decision tree:
         bias = str(training[self.label_col].value_counts().idxmax())
-        tree = self._induce_tree(training, bias)
+        tree = self._induce_tree(training, bias, list(self.feature_cols))
         # test the tree on the tuning set
         score = self._test_tree(tuning, tree)
         # prune the tree and test it on the tuning set
@@ -169,22 +204,32 @@ class DecisionTreeTrainer:
         return score, tree
     
     def tuned_tree(self, training_tuning_partitioner: DFPartitioner) -> Tuple[float, DecisionTree]:
+        """
+        Return a tree trained using the training set inferred from training_tuning_partitioner and pruned using the tuning set inferred from
+        training_tuning_partitioner. The accuracy of the tree on the tuning set is also returned.
+        """
         return self._tuned_tree(self.data, training_tuning_partitioner)
 
-    def _test_fold(self, n_fold, folds, training_tuning_partitioner):
-        print(f'fold {n_fold}')
-        non_testing = self.data.loc[self.data.index % folds != n_fold]
-        testing = self.data.loc[self.data.index % folds == n_fold]
+    def _test_fold(self, nth_fold: int, folds: int, training_tuning_partitioner: DFPartitioner):
+        """
+        When doing a cross validation, return the tested accuracy of the nth_fold.
+        """
+        non_testing = self.data.loc[self.data.index % folds != nth_fold]
+        testing = self.data.loc[self.data.index % folds == nth_fold]
         _, minus_one_tree = self._tuned_tree(non_testing, training_tuning_partitioner)
         return self._test_tree(testing, minus_one_tree)
 
     def cross_validate(self, folds: int, training_tuning_partitioner: DFPartitioner, parallel: bool) -> Tuple[float, DecisionTree]:
+        """
+        Induce and train a tree, then perform an n-fold-cross-validation to obtain an accuracy. Return the pruned tree and its estimated
+        accuracy. Toggle "parallel" for multiprocessing. If multiprocessing, make sure that all module-level user code is wrapped in an
+        "if __name__ == '__main__':" block. 
+        """
         if not parallel:
             _, tree = self._tuned_tree(self.data, training_tuning_partitioner)
             score = 0.0
-            for i in range(self.data.shape[0]):
+            for i in range(folds):
                 score += self._test_fold(i, folds, training_tuning_partitioner)
-                print(i)
             # return an average score across all trees and tests:
             return score/folds, tree
 
@@ -204,8 +249,12 @@ class DecisionTreeTrainer:
         score = sum(results) / folds
         return score, tree
     
+    # private
     @staticmethod
     def _print_tree(tree: Dict[str, DecisionTree], decorator: str, depth: int) -> None:
+        """
+        Prettyprint a decision tree!  
+        """
         for sub_feature, sub_tree in tree.items():
             if sub_feature not in ('bias', 'feature'):
                 indent = ('   '*depth)
@@ -219,4 +268,7 @@ class DecisionTreeTrainer:
 
     @staticmethod
     def print_tree(tree: DecisionTree, decorator='') -> None:
+        """
+        Prettyprint a decision tree! The decorator label will appear next to every non-leaf node's feature name.
+        """
         DecisionTreeTrainer._print_tree({'':tree}, decorator, 0)

@@ -3,14 +3,27 @@ import sys
 from typing import Tuple, List, TextIO, cast
 import pandas as pd
 import string
-from pprint import pprint
-from line_profiler import LineProfiler
+from decision_tree_trainer import DecisionTreeTrainer
 
 
 def training_tuning_partitioner(data: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     return data.loc[lambda row: row.index % 4 != 0], data[::4]
 
-def makeDecisionTree(tsvfile: TextIO):
+def makeDecisionTree() -> None:
+    # check if the user has provided a file name as a command-line argument
+    if len(sys.argv) != 2:
+        print("Usage: python decision-tree-inducer.py file_name.tsv")
+        sys.exit(1)
+
+    file_name: str = sys.argv[1]
+
+    try:
+        tsvfile: TextIO = open(file_name, newline='')
+            
+    except FileNotFoundError:
+        print(f"The file {file_name} was not found.")
+        return
+
     df = pd.read_csv(tsvfile, sep='\t', header=None, names = ['Rep', 'Party', 'Votes'])
 
     # concatenate df with the Votes column split into new columns for each issue (each character in the string).
@@ -27,48 +40,15 @@ def makeDecisionTree(tsvfile: TextIO):
 
     features =  list(string.ascii_lowercase[0:10])
     dtt = DecisionTreeTrainer(df, 'Party', features)
-    #tree = dtt.induce_tree(df, 'Rep')
-    # test =dtt.test_tree(df, tree)
-    # pprint(tree)
-    # print(test)
-    profiler = LineProfiler()
-    profiler.add_function(dtt._tuned_tree)
-    profiler.add_function(dtt._induce_tree)
-    profiler.add_function(dtt._info_gain)
-    profiler.add_function(dtt._entropy)
-    #profiler.runctx('dtt.cross_validate(50, training_tuning_partitioner, True)', globals(), locals())
-    #profiler.print_stats()
-    #pruned_score, pruned_tree = dtt.tuned_tree(training_tuning_partitioner)#
-    pruned_score, pruned_tree = dtt.cross_validate(df.shape[0], training_tuning_partitioner, True)
-    pprint(pruned_tree)
-    print(pruned_score)
+    # perform a leave-one-out accuracy test
+    pruned_acc, pruned_tree = dtt.cross_validate(df.shape[0], training_tuning_partitioner, True)
+    # print the resulting tree and its accuracy
+    print(pruned_acc)
     DecisionTreeTrainer.print_tree(pruned_tree, decorator='Issue')
 
-    test_df = pd.DataFrame({
-        'Size': ['big', 'medium', 'big', 'small', 'big', 'small', 'medium', 'small', 'medium', 'big'],
-        'Color': ['red', 'blue', 'yellow', 'blue', 'red', 'red', 'blue', 'yellow', 'blue', 'red'],
-        'Medium': ['oil', 'acrylic', 'acrylic', 'acrylic', 'watercolor', 'watercolor', 'watercolor', 'oil', 'oil', 'oil'],
-        'Label': ['good', 'good', 'good', 'good', 'good', 'bad', 'bad', 'bad', 'bad', 'bad']
-    })
-    # test_dtt = DecisionTreeTrainer('Label', ['Size', 'Color', 'Medium'])
-    # pruned_score, pruned_tree = test_dtt.cross_validate(test_df, test_df.shape[0], training_tuning_partitioner, True)
-    # pprint(pruned_tree)
-    # print(pruned_score)
 
-from decision_tree_trainer import DecisionTreeTrainer
+# wrap our module-level code in the __main__ check to facilitate multiprocessing
 if __name__ == '__main__':
-    # check if the user has provided a file name as a command-line argument
-    if len(sys.argv) != 2:
-        print("Usage: python decision-tree-inducer.py file_name.tsv")
-        sys.exit(1)
-
-    file_name: str = sys.argv[1]
-
-    try:
-        tsvfile: TextIO = open(file_name, newline='')
-        makeDecisionTree(tsvfile)
-            
-    except FileNotFoundError:
-        print(f"The file {file_name} was not found.")
+    makeDecisionTree()
 
 
