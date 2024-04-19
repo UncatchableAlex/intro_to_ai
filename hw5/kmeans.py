@@ -36,28 +36,22 @@ def kmeans(df, feature_cols, label_col, name_col, k):
     # np.argmax will return the maximum value in the lowest numbered column/row first. This corresponds with our
     # tie break rules in this assignment
     furthest_two = np.unravel_index(np.argmax(dists), dists.shape)
-    centroids_idxs = np.zeros(k, dtype=int)
-    centroids_idxs[0] = furthest_two[0]
-    centroids_idxs[1] = furthest_two[1]
+    centroids_idxs = list(furthest_two)
     for i in range(2,k):
         # calculate the distance from each of our centroids to every other point
         squared_dists = squared_distance_mat(df.iloc[centroids_idxs][feature_cols].values, df[feature_cols].values)
-
-
     
         # we have to get real distances for this to work, otherwise we violate the triangle inequality:
         # ADAM! You don't do this step in your example on the assignment.
         # while comparing squared distances to each other directly is okay, comparing the SUMS of squared distances is not a valid analog for the sum of distances
         dists = squared_dists #np.sqrt(squared_dists)
        
-       
-       
         # set the distance between centroids to zero (we don't want a centroid to get chosen twice in the case of colinear data)
         dists[:, centroids_idxs] = 0
         # for every point, sum its distance to each centroid:
         dists = dists.sum(axis=0)
         # find the point with the greatest sum of distances to each centroid
-        centroids_idxs[i] = np.argmax(dists)
+        centroids_idxs.append(np.argmax(dists))
 
     print('Initial centroids based on:\t' + ', '.join(df.loc[centroids_idxs][name_col]))
     cluster_cols = feature_cols + ['cluster']
@@ -79,7 +73,7 @@ def kmeans(df, feature_cols, label_col, name_col, k):
     # group the data by cluster and count the labels
     label_counts = df.groupby(['cluster', label_col]).size().reset_index(name='count')
     cluster_sizes = label_counts.groupby('cluster')['count'].sum().reset_index(name='size')
-
+    print(f'Converged after {iter_count} rounds of k-means.')
     # format the output
     for cluster, group in cluster_sizes.iterrows():
         cluster_id = group['cluster']
